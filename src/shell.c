@@ -1,5 +1,28 @@
 #include "shell.h"
 
+int execute_command(ParsedCommand *cmd) {
+    if (cmd->token_count == 0) {
+        return 0;  
+    }
+    
+    char *command = cmd->tokens[0];
+    
+    if (strcmp(command, "hop") == 0) {
+        char **args = &cmd->tokens[1];
+        int arg_count = cmd->token_count - 1;
+        return execute_hop(args, arg_count);
+    }
+    
+    if (strcmp(command, "reveal") == 0) {
+        char **args = &cmd->tokens[1];
+        int arg_count = cmd->token_count - 1;
+        return execute_reveal(args, arg_count);
+    }
+    
+    
+    return 0; 
+}
+
 void run_shell(void) {
     char input[SHELL_MAX_INPUT];
     
@@ -24,6 +47,8 @@ void run_shell(void) {
         
         if (cmd.token_count > 0 && !cmd.valid) {
             printf("Invalid Syntax!\n");
+        } else if (cmd.token_count > 0) {
+            execute_command(&cmd);
         }
         
         free_parsed_command(&cmd);

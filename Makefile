@@ -11,11 +11,12 @@ SRC_DIR = src
 OBJ_DIR = obj
 INCLUDE_DIR = include
 
+# Automatically includes: main.c, parser.c, prompt.c, shell.c, hop.c, reveal.c
 SOURCES = $(wildcard $(SRC_DIR)/*.c)
 OBJECTS = $(SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 EXECUTABLE = shell.out
 
-all: $(EXECUTABLE)
+all: $(EXECUTABLE) run
 
 $(EXECUTABLE): $(OBJECTS)
 	$(CC) $(CFLAGS) $(OBJECTS) -o $(EXECUTABLE)
@@ -25,8 +26,11 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(OBJ_DIR)
 	$(CC) $(CFLAGS) $(INCLUDE) -c $< -o $@
 
+run: $(EXECUTABLE)
+	./$(EXECUTABLE)
+
 clean:
 	rm -rf $(OBJ_DIR) $(EXECUTABLE)
 	@echo "Cleaned up!"
 
-.PHONY: all clean
+.PHONY: all clean run
