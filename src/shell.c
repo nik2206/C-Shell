@@ -19,8 +19,7 @@ int execute_command(ParsedCommand *cmd) {
         return execute_reveal(args, arg_count);
     }
     
-    
-    return 0; 
+    return 0;
 }
 
 void run_shell(void) {
@@ -54,3 +53,5 @@ void run_shell(void) {
         free_parsed_command(&cmd);
     }
 }
+
+

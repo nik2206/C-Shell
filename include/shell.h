@@ -21,6 +21,7 @@ extern char previous_dir[SHELL_MAX_PATH];
 
 void run_shell(void);
 
+// Execute a shell command
 int execute_command(ParsedCommand *cmd);
 
 #endif

@@ -77,7 +77,7 @@ int execute_reveal(char **args, int arg_count) {
                 }
             }
         } else if (args[i][0] != '-' || (args[i][0] == '-' && args[i][1] == '\0')) {
-            if (path_index != -1) {
+            if (path_index != -1) { // because we can only have one path argument
                 printf("reveal: Invalid Syntax!\n");
                 return 1;
             }
@@ -87,7 +87,7 @@ int execute_reveal(char **args, int arg_count) {
     
     char target_path[4096];
     
-    if (path_index == -1) {
+    if (path_index == -1) { // if no path argument is provided, use current directory
         strcpy(target_path, current_dir);
     } else {
         char *path_arg = args[path_index];
@@ -101,10 +101,10 @@ int execute_reveal(char **args, int arg_count) {
             strcpy(temp, current_dir);
             
             char *last_slash = strrchr(temp, '/');
-            if (last_slash == NULL || last_slash == temp) {
+            if (last_slash == NULL || last_slash == temp) { // if we are at root or there is no slash, we stay at root
                 strcpy(target_path, "/");
             } else {
-                *last_slash = '\0';
+                *last_slash = '\0'; // to remove the last part of the path after the last slash
                 strcpy(target_path, temp);
             }
         } else if (strcmp(path_arg, "-") == 0) {
