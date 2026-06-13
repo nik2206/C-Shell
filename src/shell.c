@@ -1,5 +1,6 @@
 #include "shell.h"
 
+// Execute a parsed command by dispatching to the correct handler
 int execute_command(ParsedCommand *cmd) {
     if (cmd->token_count == 0) {
         return 0;  
@@ -19,11 +20,35 @@ int execute_command(ParsedCommand *cmd) {
         return execute_reveal(args, arg_count);
     }
     
+    if (strcmp(command, "log") == 0) {
+        char **args = &cmd->tokens[1];
+        int arg_count = cmd->token_count - 1;
+        char reexec_buf[SHELL_MAX_INPUT];
+        reexec_buf[0] = '\0';
+
+        int needs_reexec = execute_log(args, arg_count, reexec_buf);
+
+        // Re-parse and execute the recalled command
+        if (needs_reexec && strlen(reexec_buf) > 0) {
+            ParsedCommand recmd = parse_input(reexec_buf);
+            if (recmd.token_count > 0 && !recmd.valid) {
+                printf("Invalid Syntax!\n");
+            } else if (recmd.token_count > 0) {
+                execute_command(&recmd);
+            }
+            free_parsed_command(&recmd);
+        }
+        return 0;
+    }
+    
     return 0;
 }
 
 void run_shell(void) {
     char input[SHELL_MAX_INPUT];
+
+    // Load persistent log history at startup
+    initialize_log();
     
     while (1) { // infinite loop as we want the shell to keep running until user exits
         display_prompt();
@@ -41,17 +66,25 @@ void run_shell(void) {
         if (strlen(input) == 0) {
             continue;
         }
-        
+
+        // Keep a copy of the raw input before parsing for the log
+        char raw_input[SHELL_MAX_INPUT];
+        strncpy(raw_input, input, SHELL_MAX_INPUT - 1);
+        raw_input[SHELL_MAX_INPUT - 1] = '\0';
+
         ParsedCommand cmd = parse_input(input);
         
         if (cmd.token_count > 0 && !cmd.valid) {
             printf("Invalid Syntax!\n");
         } else if (cmd.token_count > 0) {
+            // Store in log before executing, but skip if command is "log"
+            if (!is_log_command(raw_input)) {
+                add_to_log(raw_input);
+            }
+
             execute_command(&cmd);
         }
         
         free_parsed_command(&cmd);
     }
 }
-
-
