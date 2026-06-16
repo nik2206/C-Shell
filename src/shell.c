@@ -6,23 +6,46 @@ int execute_command(ParsedCommand *cmd) {
         return 0;  
     }
     
+    // Find end of first cmd_group (stop at ; or &)
+    int group_end = cmd->token_count;
+    for (int i = 0; i < cmd->token_count; i++) {
+        if (strcmp(cmd->tokens[i], ";") == 0 || strcmp(cmd->tokens[i], "&") == 0) {
+            group_end = i;
+            break;
+        }
+    }
+
+    // Find end of first atomic within the cmd_group (stop at |)
+    int atomic_end = group_end;
+    for (int i = 0; i < group_end; i++) {
+        if (strcmp(cmd->tokens[i], "|") == 0) {
+            atomic_end = i;
+            break;
+        }
+    }
+
+    if (atomic_end == 0) {
+        return 0;
+    }
+    
     char *command = cmd->tokens[0];
     
+    // Handle builtins
     if (strcmp(command, "hop") == 0) {
         char **args = &cmd->tokens[1];
-        int arg_count = cmd->token_count - 1;
+        int arg_count = atomic_end - 1;
         return execute_hop(args, arg_count);
     }
     
     if (strcmp(command, "reveal") == 0) {
         char **args = &cmd->tokens[1];
-        int arg_count = cmd->token_count - 1;
+        int arg_count = atomic_end - 1;
         return execute_reveal(args, arg_count);
     }
     
     if (strcmp(command, "log") == 0) {
         char **args = &cmd->tokens[1];
-        int arg_count = cmd->token_count - 1;
+        int arg_count = atomic_end - 1;
         char reexec_buf[SHELL_MAX_INPUT];
         reexec_buf[0] = '\0';
 
@@ -40,6 +63,45 @@ int execute_command(ParsedCommand *cmd) {
         }
         return 0;
     }
+    
+    // clearing the redirections and their filenames and passing the remaining tokens to the execvp function
+    char *argv[SHELL_MAX_INPUT];
+    int argc = 0;
+    
+    for (int i = 0; i < atomic_end; i++) {
+        if (strcmp(cmd->tokens[i], "<") == 0 ||
+            strcmp(cmd->tokens[i], ">") == 0 ||
+            strcmp(cmd->tokens[i], ">>") == 0) {
+            i++; // skip the filename after the operator
+            continue;
+        }
+        argv[argc++] = cmd->tokens[i];
+    }
+    argv[argc] = NULL;
+
+    if (argc == 0) {
+        return 0;
+    }
+
+    // Fork and exec
+    pid_t pid = fork();
+    
+    if (pid < 0) {
+        perror("fork");
+        return 1;
+    }
+    
+    if (pid == 0) {
+        // Child process
+        execvp(argv[0], argv);
+        // If execvp returns, the command was not found
+        printf("Command not found!\n");
+        _exit(1);
+    }
+    
+    // Parent process - wait for child to finish
+    int status;
+    waitpid(pid, &status, 0);
     
     return 0;
 }
