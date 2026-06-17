@@ -64,15 +64,37 @@ int execute_command(ParsedCommand *cmd) {
         return 0;
     }
     
-    // clearing the redirections and their filenames and passing the remaining tokens to the execvp function
+    // Build argv, skipping redirection operators and their filenames
     char *argv[SHELL_MAX_INPUT];
     int argc = 0;
     
+    // Find the last input/output redirection files 
+    char *input_file = NULL;
+    char *output_file = NULL;
+    int output_append = 0; // 0 = truncate (>), 1 = append (>>)
+    
     for (int i = 0; i < atomic_end; i++) {
-        if (strcmp(cmd->tokens[i], "<") == 0 ||
-            strcmp(cmd->tokens[i], ">") == 0 ||
-            strcmp(cmd->tokens[i], ">>") == 0) {
-            i++; // skip the filename after the operator
+        if (strcmp(cmd->tokens[i], "<") == 0) {
+            if (i + 1 < atomic_end) {
+                input_file = cmd->tokens[i + 1];
+                i++; // skip the filename
+            }
+            continue;
+        }
+        if (strcmp(cmd->tokens[i], ">>") == 0) {
+            if (i + 1 < atomic_end) {
+                output_file = cmd->tokens[i + 1];
+                output_append = 1;
+                i++; // skip the filename
+            }
+            continue;
+        }
+        if (strcmp(cmd->tokens[i], ">") == 0) {
+            if (i + 1 < atomic_end) {
+                output_file = cmd->tokens[i + 1];
+                output_append = 0;
+                i++; // skip the filename
+            }
             continue;
         }
         argv[argc++] = cmd->tokens[i];
@@ -81,6 +103,28 @@ int execute_command(ParsedCommand *cmd) {
 
     if (argc == 0) {
         return 0;
+    }
+
+    // Validate input file before forking
+    if (input_file != NULL) {
+        int test_fd = open(input_file, O_RDONLY);
+        if (test_fd < 0) {
+            printf("No such file or directory\n");
+            return 1;
+        }
+        close(test_fd);
+    }
+
+    // Validate output file before forking
+    if (output_file != NULL) {
+        int flags = O_WRONLY | O_CREAT;
+        flags |= output_append ? O_APPEND : O_TRUNC;
+        int test_fd = open(output_file, flags, 0644);
+        if (test_fd < 0) {
+            printf("Unable to create file for writing\n");
+            return 1;
+        }
+        close(test_fd);
     }
 
     // Fork and exec
@@ -92,7 +136,30 @@ int execute_command(ParsedCommand *cmd) {
     }
     
     if (pid == 0) {
-        // Child process
+        // Child process - set up input redirection
+        if (input_file != NULL) {
+            int fd_in = open(input_file, O_RDONLY);
+            if (fd_in < 0) {
+                printf("No such file or directory\n");
+                _exit(1);
+            }
+            dup2(fd_in, STDIN_FILENO);
+            close(fd_in);
+        }
+        
+        // Child process - set up output redirection
+        if (output_file != NULL) {
+            int flags = O_WRONLY | O_CREAT;
+            flags |= output_append ? O_APPEND : O_TRUNC;
+            int fd_out = open(output_file, flags, 0644);
+            if (fd_out < 0) {
+                printf("Unable to create file for writing\n");
+                _exit(1);
+            }
+            dup2(fd_out, STDOUT_FILENO);
+            close(fd_out);
+        }
+        
         execvp(argv[0], argv);
         // If execvp returns, the command was not found
         printf("Command not found!\n");
