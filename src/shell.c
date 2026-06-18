@@ -1,12 +1,160 @@
 #include "shell.h"
 
+#define MAX_PIPE_CMDS 64
+
+static int execute_pipeline(char **tokens, int group_end) {
+    // Find pipe positions
+    int pipe_pos[MAX_PIPE_CMDS];
+    int pipe_count = 0;
+    //finds pos of pipes
+    for (int i = 0; i < group_end; i++) {
+        if (strcmp(tokens[i], "|") == 0) {
+            pipe_pos[pipe_count++] = i;
+        }
+    }
+
+    int cmd_count = pipe_count + 1;
+
+    // Find start and end index for each command's tokens
+    int cmd_start[MAX_PIPE_CMDS];
+    int cmd_end[MAX_PIPE_CMDS];
+
+    cmd_start[0] = 0;
+    for (int i = 0; i < pipe_count; i++) {
+        cmd_end[i] = pipe_pos[i];
+        cmd_start[i + 1] = pipe_pos[i] + 1;
+    }
+    cmd_end[cmd_count - 1] = group_end;
+
+    // Create pipes between adjacent commands
+    int pipe_fds[MAX_PIPE_CMDS][2]; // 0 is read fd, 1 is write fd
+    for (int i = 0; i < pipe_count; i++) {
+        if (pipe(pipe_fds[i]) < 0) {
+            perror("pipe");
+            return 1;
+        }
+    }
+
+    // Fork a child for each command in the pipeline
+    pid_t pids[MAX_PIPE_CMDS];
+    for (int j = 0; j < cmd_count; j++) {
+        pids[j] = -1;
+    }
+
+    for (int j = 0; j < cmd_count; j++) {
+        // Extract argv, input_file, output_file for this atomic
+        char *argv[SHELL_MAX_INPUT];
+        int argc = 0;
+        char *input_file = NULL;
+        char *output_file = NULL;
+        int output_append = 0;
+
+        for (int i = cmd_start[j]; i < cmd_end[j]; i++) {
+            if (strcmp(tokens[i], "<") == 0) {
+                if (i + 1 < cmd_end[j]) {
+                    input_file = tokens[i + 1];
+                    i++;
+                }
+                continue;
+            }
+            if (strcmp(tokens[i], ">>") == 0) {
+                if (i + 1 < cmd_end[j]) {
+                    output_file = tokens[i + 1];
+                    output_append = 1;
+                    i++;
+                }
+                continue;
+            }
+            if (strcmp(tokens[i], ">") == 0) {
+                if (i + 1 < cmd_end[j]) {
+                    output_file = tokens[i + 1];
+                    output_append = 0;
+                    i++;
+                }
+                continue;
+            }
+            argv[argc++] = tokens[i];
+        }
+        argv[argc] = NULL;
+
+        if (argc == 0) {
+            continue;
+        }
+
+        pids[j] = fork();
+        if (pids[j] < 0) {
+            perror("fork");
+            continue;
+        }
+
+        if (pids[j] == 0) {
+            // connect pipe input 
+            if (j > 0) {
+                dup2(pipe_fds[j - 1][0], STDIN_FILENO);
+            }
+
+            //connect pipe output 
+            if (j < cmd_count - 1) {
+                dup2(pipe_fds[j][1], STDOUT_FILENO);
+            }
+
+            for (int i = 0; i < pipe_count; i++) {
+                close(pipe_fds[i][0]);
+                close(pipe_fds[i][1]);
+            }
+
+            // File redirections override pipe redirections
+            if (input_file != NULL) {
+                int fd_in = open(input_file, O_RDONLY);
+                if (fd_in < 0) {
+                    printf("No such file or directory\n");
+                    _exit(1);
+                }
+                dup2(fd_in, STDIN_FILENO);
+                close(fd_in);
+            }
+
+            if (output_file != NULL) {
+                int flags = O_WRONLY | O_CREAT;
+                flags |= output_append ? O_APPEND : O_TRUNC;
+                int fd_out = open(output_file, flags, 0644);
+                if (fd_out < 0) {
+                    printf("Unable to create file for writing\n");
+                    _exit(1);
+                }
+                dup2(fd_out, STDOUT_FILENO);
+                close(fd_out);
+            }
+
+            execvp(argv[0], argv);
+            printf("Command not found!\n");
+            _exit(1);
+        }
+    }
+    // closing copy of file descriptors
+    for (int i = 0; i < pipe_count; i++) {
+        close(pipe_fds[i][0]);
+        close(pipe_fds[i][1]);
+    }
+
+    // Wait for children to finish
+    for (int j = 0; j < cmd_count; j++) {
+        if (pids[j] > 0) {
+            int status;
+            waitpid(pids[j], &status, 0);
+        }
+    }
+
+    return 0;
+}
+
 // Execute a parsed command by dispatching to the correct handler
 int execute_command(ParsedCommand *cmd) {
     if (cmd->token_count == 0) {
         return 0;  
     }
     
-    // Find end of first cmd_group (stop at ; or &)
+    // Find end of first cmd_group 
     int group_end = cmd->token_count;
     for (int i = 0; i < cmd->token_count; i++) {
         if (strcmp(cmd->tokens[i], ";") == 0 || strcmp(cmd->tokens[i], "&") == 0) {
@@ -15,37 +163,42 @@ int execute_command(ParsedCommand *cmd) {
         }
     }
 
-    // Find end of first atomic within the cmd_group (stop at |)
-    int atomic_end = group_end;
+    if (group_end == 0) {
+        return 0;
+    }
+
+    // Check for pipes in the first cmd_group
+    int has_pipes = 0;
     for (int i = 0; i < group_end; i++) {
         if (strcmp(cmd->tokens[i], "|") == 0) {
-            atomic_end = i;
+            has_pipes = 1;
             break;
         }
     }
 
-    if (atomic_end == 0) {
-        return 0;
+    // If pipes present, use pipeline execution
+    if (has_pipes) {
+        return execute_pipeline(cmd->tokens, group_end);
     }
-    
+
+    // Single command 
     char *command = cmd->tokens[0];
     
-    // Handle builtins
     if (strcmp(command, "hop") == 0) {
         char **args = &cmd->tokens[1];
-        int arg_count = atomic_end - 1;
+        int arg_count = group_end - 1;
         return execute_hop(args, arg_count);
     }
     
     if (strcmp(command, "reveal") == 0) {
         char **args = &cmd->tokens[1];
-        int arg_count = atomic_end - 1;
+        int arg_count = group_end - 1;
         return execute_reveal(args, arg_count);
     }
     
     if (strcmp(command, "log") == 0) {
         char **args = &cmd->tokens[1];
-        int arg_count = atomic_end - 1;
+        int arg_count = group_end - 1;
         char reexec_buf[SHELL_MAX_INPUT];
         reexec_buf[0] = '\0';
 
@@ -64,36 +217,34 @@ int execute_command(ParsedCommand *cmd) {
         return 0;
     }
     
-    // Build argv, skipping redirection operators and their filenames
+    // External single command - build argv with redirections
     char *argv[SHELL_MAX_INPUT];
     int argc = 0;
-    
-    // Find the last input/output redirection files 
     char *input_file = NULL;
     char *output_file = NULL;
-    int output_append = 0; // 0 = truncate (>), 1 = append (>>)
+    int output_append = 0;
     
-    for (int i = 0; i < atomic_end; i++) {
+    for (int i = 0; i < group_end; i++) {
         if (strcmp(cmd->tokens[i], "<") == 0) {
-            if (i + 1 < atomic_end) {
+            if (i + 1 < group_end) {
                 input_file = cmd->tokens[i + 1];
-                i++; // skip the filename
+                i++;
             }
             continue;
         }
         if (strcmp(cmd->tokens[i], ">>") == 0) {
-            if (i + 1 < atomic_end) {
+            if (i + 1 < group_end) {
                 output_file = cmd->tokens[i + 1];
                 output_append = 1;
-                i++; // skip the filename
+                i++;
             }
             continue;
         }
         if (strcmp(cmd->tokens[i], ">") == 0) {
-            if (i + 1 < atomic_end) {
+            if (i + 1 < group_end) {
                 output_file = cmd->tokens[i + 1];
                 output_append = 0;
-                i++; // skip the filename
+                i++;
             }
             continue;
         }
@@ -161,7 +312,6 @@ int execute_command(ParsedCommand *cmd) {
         }
         
         execvp(argv[0], argv);
-        // If execvp returns, the command was not found
         printf("Command not found!\n");
         _exit(1);
     }
