@@ -2,11 +2,12 @@
 
 #define MAX_PIPE_CMDS 64
 
+// Execute a pipeline of commands connected by pipes
 static int execute_pipeline(char **tokens, int group_end) {
     // Find pipe positions
     int pipe_pos[MAX_PIPE_CMDS];
     int pipe_count = 0;
-    //finds pos of pipes
+
     for (int i = 0; i < group_end; i++) {
         if (strcmp(tokens[i], "|") == 0) {
             pipe_pos[pipe_count++] = i;
@@ -27,7 +28,7 @@ static int execute_pipeline(char **tokens, int group_end) {
     cmd_end[cmd_count - 1] = group_end;
 
     // Create pipes between adjacent commands
-    int pipe_fds[MAX_PIPE_CMDS][2]; // 0 is read fd, 1 is write fd
+    int pipe_fds[MAX_PIPE_CMDS][2];
     for (int i = 0; i < pipe_count; i++) {
         if (pipe(pipe_fds[i]) < 0) {
             perror("pipe");
@@ -88,12 +89,12 @@ static int execute_pipeline(char **tokens, int group_end) {
         }
 
         if (pids[j] == 0) {
-            // connect pipe input 
+            // Connect pipe input
             if (j > 0) {
                 dup2(pipe_fds[j - 1][0], STDIN_FILENO);
             }
 
-            //connect pipe output 
+            // Connect pipe output
             if (j < cmd_count - 1) {
                 dup2(pipe_fds[j][1], STDOUT_FILENO);
             }
@@ -131,13 +132,14 @@ static int execute_pipeline(char **tokens, int group_end) {
             _exit(1);
         }
     }
-    // closing copy of file descriptors
+
+    // Parent: close all pipe fds
     for (int i = 0; i < pipe_count; i++) {
         close(pipe_fds[i][0]);
         close(pipe_fds[i][1]);
     }
 
-    // Wait for children to finish
+    // Wait for all children to finish
     for (int j = 0; j < cmd_count; j++) {
         if (pids[j] > 0) {
             int status;
@@ -148,57 +150,43 @@ static int execute_pipeline(char **tokens, int group_end) {
     return 0;
 }
 
-// Execute a parsed command by dispatching to the correct handler
-int execute_command(ParsedCommand *cmd) {
-    if (cmd->token_count == 0) {
-        return 0;  
-    }
-    
-    // Find end of first cmd_group 
-    int group_end = cmd->token_count;
-    for (int i = 0; i < cmd->token_count; i++) {
-        if (strcmp(cmd->tokens[i], ";") == 0 || strcmp(cmd->tokens[i], "&") == 0) {
-            group_end = i;
-            break;
-        }
-    }
-
-    if (group_end == 0) {
+static int execute_cmd_group(char **tokens, int count) {
+    if (count == 0) {
         return 0;
     }
 
-    // Check for pipes in the first cmd_group
+    // Check for pipes in this cmd_group
     int has_pipes = 0;
-    for (int i = 0; i < group_end; i++) {
-        if (strcmp(cmd->tokens[i], "|") == 0) {
+    for (int i = 0; i < count; i++) {
+        if (strcmp(tokens[i], "|") == 0) {
             has_pipes = 1;
             break;
         }
     }
 
-    // If pipes present, use pipeline execution
+    // If pipes present use pipeline execution
     if (has_pipes) {
-        return execute_pipeline(cmd->tokens, group_end);
+        return execute_pipeline(tokens, count);
     }
 
     // Single command 
-    char *command = cmd->tokens[0];
-    
+    char *command = tokens[0];
+
     if (strcmp(command, "hop") == 0) {
-        char **args = &cmd->tokens[1];
-        int arg_count = group_end - 1;
+        char **args = &tokens[1];
+        int arg_count = count - 1;
         return execute_hop(args, arg_count);
     }
-    
+
     if (strcmp(command, "reveal") == 0) {
-        char **args = &cmd->tokens[1];
-        int arg_count = group_end - 1;
+        char **args = &tokens[1];
+        int arg_count = count - 1;
         return execute_reveal(args, arg_count);
     }
-    
+
     if (strcmp(command, "log") == 0) {
-        char **args = &cmd->tokens[1];
-        int arg_count = group_end - 1;
+        char **args = &tokens[1];
+        int arg_count = count - 1;
         char reexec_buf[SHELL_MAX_INPUT];
         reexec_buf[0] = '\0';
 
@@ -216,39 +204,39 @@ int execute_command(ParsedCommand *cmd) {
         }
         return 0;
     }
-    
+
     // External single command - build argv with redirections
     char *argv[SHELL_MAX_INPUT];
     int argc = 0;
     char *input_file = NULL;
     char *output_file = NULL;
     int output_append = 0;
-    
-    for (int i = 0; i < group_end; i++) {
-        if (strcmp(cmd->tokens[i], "<") == 0) {
-            if (i + 1 < group_end) {
-                input_file = cmd->tokens[i + 1];
+
+    for (int i = 0; i < count; i++) {
+        if (strcmp(tokens[i], "<") == 0) {
+            if (i + 1 < count) {
+                input_file = tokens[i + 1];
                 i++;
             }
             continue;
         }
-        if (strcmp(cmd->tokens[i], ">>") == 0) {
-            if (i + 1 < group_end) {
-                output_file = cmd->tokens[i + 1];
+        if (strcmp(tokens[i], ">>") == 0) {
+            if (i + 1 < count) {
+                output_file = tokens[i + 1];
                 output_append = 1;
                 i++;
             }
             continue;
         }
-        if (strcmp(cmd->tokens[i], ">") == 0) {
-            if (i + 1 < group_end) {
-                output_file = cmd->tokens[i + 1];
+        if (strcmp(tokens[i], ">") == 0) {
+            if (i + 1 < count) {
+                output_file = tokens[i + 1];
                 output_append = 0;
                 i++;
             }
             continue;
         }
-        argv[argc++] = cmd->tokens[i];
+        argv[argc++] = tokens[i];
     }
     argv[argc] = NULL;
 
@@ -280,12 +268,12 @@ int execute_command(ParsedCommand *cmd) {
 
     // Fork and exec
     pid_t pid = fork();
-    
+
     if (pid < 0) {
         perror("fork");
         return 1;
     }
-    
+
     if (pid == 0) {
         // Child process - set up input redirection
         if (input_file != NULL) {
@@ -297,7 +285,7 @@ int execute_command(ParsedCommand *cmd) {
             dup2(fd_in, STDIN_FILENO);
             close(fd_in);
         }
-        
+
         // Child process - set up output redirection
         if (output_file != NULL) {
             int flags = O_WRONLY | O_CREAT;
@@ -310,16 +298,50 @@ int execute_command(ParsedCommand *cmd) {
             dup2(fd_out, STDOUT_FILENO);
             close(fd_out);
         }
-        
+
         execvp(argv[0], argv);
         printf("Command not found!\n");
         _exit(1);
     }
-    
+
     // Parent process - wait for child to finish
     int status;
     waitpid(pid, &status, 0);
-    
+
+    return 0;
+}
+
+// Execute a parsed command - loops through cmd_groups separated by ; or &
+int execute_command(ParsedCommand *cmd) {
+    if (cmd->token_count == 0) {
+        return 0;
+    }
+
+    int i = 0;
+    while (i < cmd->token_count) {
+        // Find end of current cmd_group 
+        int group_end = cmd->token_count;
+        for (int j = i; j < cmd->token_count; j++) {
+            if (strcmp(cmd->tokens[j], ";") == 0 || strcmp(cmd->tokens[j], "&") == 0) {
+                group_end = j;
+                break;
+            }
+        }
+
+        // Execute cmd_group
+        int group_len = group_end - i;
+        if (group_len > 0) {
+            execute_cmd_group(&cmd->tokens[i], group_len);
+        }
+
+        // Move to next cmd_group
+        if (group_end < cmd->token_count) {
+            i = group_end + 1;
+        } else {
+            break;
+        }
+    }
+
     return 0;
 }
 
@@ -328,20 +350,20 @@ void run_shell(void) {
 
     // Load persistent log history at startup
     initialize_log();
-    
+
     while (1) { // infinite loop as we want the shell to keep running until user exits
         display_prompt();
-        
+
         if (fgets(input, SHELL_MAX_INPUT, stdin) == NULL) {
             printf("logout\n");
             break;
         }
-        
+
         size_t len = strlen(input);
         if (len > 0 && input[len - 1] == '\n') {
             input[len - 1] = '\0';
         }
-        
+
         if (strlen(input) == 0) {
             continue;
         }
@@ -352,7 +374,7 @@ void run_shell(void) {
         raw_input[SHELL_MAX_INPUT - 1] = '\0';
 
         ParsedCommand cmd = parse_input(input);
-        
+
         if (cmd.token_count > 0 && !cmd.valid) {
             printf("Invalid Syntax!\n");
         } else if (cmd.token_count > 0) {
@@ -363,7 +385,7 @@ void run_shell(void) {
 
             execute_command(&cmd);
         }
-        
+
         free_parsed_command(&cmd);
     }
 }
