@@ -308,7 +308,10 @@ static int execute_cmd_group(char **tokens, int count) {
     int status;
     waitpid(pid, &status, 0);
 
-    return 0;
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    return 1;
 }
 
 // Execute a parsed command - loops through cmd_groups separated by ; or &
@@ -319,19 +322,44 @@ int execute_command(ParsedCommand *cmd) {
 
     int i = 0;
     while (i < cmd->token_count) {
-        // Find end of current cmd_group 
+        // Find end of current cmd_group and what separator follows it
         int group_end = cmd->token_count;
+        char *separator = NULL;
         for (int j = i; j < cmd->token_count; j++) {
             if (strcmp(cmd->tokens[j], ";") == 0 || strcmp(cmd->tokens[j], "&") == 0) {
                 group_end = j;
+                separator = cmd->tokens[j];
                 break;
             }
         }
 
-        // Execute cmd_group
         int group_len = group_end - i;
+        int is_background = (separator != NULL && strcmp(separator, "&") == 0);
+
         if (group_len > 0) {
-            execute_cmd_group(&cmd->tokens[i], group_len);
+            if (is_background) {
+                // Background execution - fork a wrapper child
+                char *cmd_name = cmd->tokens[i]; // first token is the command name
+
+                pid_t bg_pid = fork();
+                if (bg_pid < 0) {
+                    perror("fork");
+                } else if (bg_pid == 0) {
+                    // Child: close terminal input for background process
+                    int dev_null = open("/dev/null", O_RDONLY);
+                    if (dev_null >= 0) {
+                        dup2(dev_null, STDIN_FILENO);
+                        close(dev_null);
+                    }
+                    int ret = execute_cmd_group(&cmd->tokens[i], group_len);
+                    _exit(ret);
+                } else {
+                    // Parent: record background job
+                    add_bg_job(bg_pid, cmd_name);
+                }
+            } else {
+                execute_cmd_group(&cmd->tokens[i], group_len);
+            }
         }
 
         // Move to next cmd_group
@@ -367,6 +395,9 @@ void run_shell(void) {
         if (strlen(input) == 0) {
             continue;
         }
+
+        // Check for completed background processes before parsing
+        check_bg_jobs();
 
         // Keep a copy of the raw input before parsing for the log
         char raw_input[SHELL_MAX_INPUT];

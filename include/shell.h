@@ -13,6 +13,7 @@
 #include "hop.h"
 #include "reveal.h"
 #include "log.h"
+#include "bg.h"
 
 #define SHELL_MAX_INPUT 1024
 #define SHELL_MAX_PATH 4096
