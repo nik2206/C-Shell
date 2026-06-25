@@ -99,6 +99,7 @@ static int execute_pipeline(char **tokens, int group_end) {
                 dup2(pipe_fds[j][1], STDOUT_FILENO);
             }
 
+            // Close all pipe fds in child
             for (int i = 0; i < pipe_count; i++) {
                 close(pipe_fds[i][0]);
                 close(pipe_fds[i][1]);
@@ -150,10 +151,14 @@ static int execute_pipeline(char **tokens, int group_end) {
     return 0;
 }
 
-static int execute_cmd_group(char **tokens, int count) {
+// Execute a single cmd_group
+// If background=1, forks without waiting and records the job
+static int execute_cmd_group(char **tokens, int count, int background) {
     if (count == 0) {
         return 0;
     }
+
+    char *cmd_name = tokens[0];
 
     // Check for pipes in this cmd_group
     int has_pipes = 0;
@@ -164,12 +169,32 @@ static int execute_cmd_group(char **tokens, int count) {
         }
     }
 
-    // If pipes present use pipeline execution
+    // Pipeline in background: use a wrapper child
+    if (has_pipes && background) {
+        pid_t bg_pid = fork();
+        if (bg_pid < 0) {
+            perror("fork");
+            return 1;
+        }
+        if (bg_pid == 0) {
+            int dev_null = open("/dev/null", O_RDONLY);
+            if (dev_null >= 0) {
+                dup2(dev_null, STDIN_FILENO);
+                close(dev_null);
+            }
+            int ret = execute_pipeline(tokens, count);
+            _exit(ret);
+        }
+        add_bg_job(bg_pid, cmd_name);
+        return 0;
+    }
+
+    // Pipeline in foreground
     if (has_pipes) {
         return execute_pipeline(tokens, count);
     }
 
-    // Single command 
+    // Single command - check builtins first (builtins always run in foreground)
     char *command = tokens[0];
 
     if (strcmp(command, "hop") == 0) {
@@ -203,6 +228,16 @@ static int execute_cmd_group(char **tokens, int count) {
             free_parsed_command(&recmd);
         }
         return 0;
+    }
+
+    if (strcmp(command, "activities") == 0) {
+        return execute_activities();
+    }
+
+    if (strcmp(command, "ping") == 0) {
+        char **args = &tokens[1];
+        int arg_count = count - 1;
+        return execute_ping(args, arg_count);
     }
 
     // External single command - build argv with redirections
@@ -275,6 +310,15 @@ static int execute_cmd_group(char **tokens, int count) {
     }
 
     if (pid == 0) {
+        // Background: close terminal input
+        if (background) {
+            int dev_null = open("/dev/null", O_RDONLY);
+            if (dev_null >= 0) {
+                dup2(dev_null, STDIN_FILENO);
+                close(dev_null);
+            }
+        }
+
         // Child process - set up input redirection
         if (input_file != NULL) {
             int fd_in = open(input_file, O_RDONLY);
@@ -304,7 +348,13 @@ static int execute_cmd_group(char **tokens, int count) {
         _exit(1);
     }
 
-    // Parent process - wait for child to finish
+    if (background) {
+        // Background: don't wait, record the job
+        add_bg_job(pid, cmd_name);
+        return 0;
+    }
+
+    // Foreground: wait for child to finish
     int status;
     waitpid(pid, &status, 0);
 
@@ -337,29 +387,7 @@ int execute_command(ParsedCommand *cmd) {
         int is_background = (separator != NULL && strcmp(separator, "&") == 0);
 
         if (group_len > 0) {
-            if (is_background) {
-                // Background execution - fork a wrapper child
-                char *cmd_name = cmd->tokens[i]; // first token is the command name
-
-                pid_t bg_pid = fork();
-                if (bg_pid < 0) {
-                    perror("fork");
-                } else if (bg_pid == 0) {
-                    // Child: close terminal input for background process
-                    int dev_null = open("/dev/null", O_RDONLY);
-                    if (dev_null >= 0) {
-                        dup2(dev_null, STDIN_FILENO);
-                        close(dev_null);
-                    }
-                    int ret = execute_cmd_group(&cmd->tokens[i], group_len);
-                    _exit(ret);
-                } else {
-                    // Parent: record background job
-                    add_bg_job(bg_pid, cmd_name);
-                }
-            } else {
-                execute_cmd_group(&cmd->tokens[i], group_len);
-            }
+            execute_cmd_group(&cmd->tokens[i], group_len, is_background);
         }
 
         // Move to next cmd_group
