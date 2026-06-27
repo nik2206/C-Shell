@@ -2,6 +2,25 @@
 
 #define MAX_PIPE_CMDS 64
 
+// Signal handler for Ctrl-C (SIGINT)
+static void sigint_handler(int sig) {
+    (void)sig;
+    if (fg_pid > 0) {
+        kill(fg_pid, SIGINT);
+    } else {
+        // No foreground child — just print a newline for clean prompt
+        printf("\n");
+    }
+}
+
+// Signal handler for Ctrl-Z (SIGTSTP)
+static void sigtstp_handler(int sig) {
+    (void)sig;
+    if (fg_pid > 0) {
+        kill(fg_pid, SIGTSTP);
+    }
+}
+
 // Execute a pipeline of commands connected by pipes
 static int execute_pipeline(char **tokens, int group_end) {
     // Find pipe positions
@@ -43,7 +62,6 @@ static int execute_pipeline(char **tokens, int group_end) {
     }
 
     for (int j = 0; j < cmd_count; j++) {
-        // Extract argv, input_file, output_file for this atomic
         char *argv[SHELL_MAX_INPUT];
         int argc = 0;
         char *input_file = NULL;
@@ -89,23 +107,23 @@ static int execute_pipeline(char **tokens, int group_end) {
         }
 
         if (pids[j] == 0) {
-            // Connect pipe input
+            // Restore default signal handlers in child
+            signal(SIGINT, SIG_DFL);
+            signal(SIGTSTP, SIG_DFL);
+
             if (j > 0) {
                 dup2(pipe_fds[j - 1][0], STDIN_FILENO);
             }
 
-            // Connect pipe output
             if (j < cmd_count - 1) {
                 dup2(pipe_fds[j][1], STDOUT_FILENO);
             }
 
-            // Close all pipe fds in child
             for (int i = 0; i < pipe_count; i++) {
                 close(pipe_fds[i][0]);
                 close(pipe_fds[i][1]);
             }
 
-            // File redirections override pipe redirections
             if (input_file != NULL) {
                 int fd_in = open(input_file, O_RDONLY);
                 if (fd_in < 0) {
@@ -177,6 +195,8 @@ static int execute_cmd_group(char **tokens, int count, int background) {
             return 1;
         }
         if (bg_pid == 0) {
+            signal(SIGINT, SIG_DFL);
+            signal(SIGTSTP, SIG_DFL);
             int dev_null = open("/dev/null", O_RDONLY);
             if (dev_null >= 0) {
                 dup2(dev_null, STDIN_FILENO);
@@ -194,7 +214,7 @@ static int execute_cmd_group(char **tokens, int count, int background) {
         return execute_pipeline(tokens, count);
     }
 
-    // Single command - check builtins first (builtins always run in foreground)
+    // Single command - check builtins first
     char *command = tokens[0];
 
     if (strcmp(command, "hop") == 0) {
@@ -217,7 +237,6 @@ static int execute_cmd_group(char **tokens, int count, int background) {
 
         int needs_reexec = execute_log(args, arg_count, reexec_buf);
 
-        // Re-parse and execute the recalled command
         if (needs_reexec && strlen(reexec_buf) > 0) {
             ParsedCommand recmd = parse_input(reexec_buf);
             if (recmd.token_count > 0 && !recmd.valid) {
@@ -238,6 +257,18 @@ static int execute_cmd_group(char **tokens, int count, int background) {
         char **args = &tokens[1];
         int arg_count = count - 1;
         return execute_ping(args, arg_count);
+    }
+
+    if (strcmp(command, "fg") == 0) {
+        char **args = &tokens[1];
+        int arg_count = count - 1;
+        return execute_fg(args, arg_count);
+    }
+
+    if (strcmp(command, "bg") == 0) {
+        char **args = &tokens[1];
+        int arg_count = count - 1;
+        return execute_bg_cmd(args, arg_count);
     }
 
     // External single command - build argv with redirections
@@ -310,6 +341,10 @@ static int execute_cmd_group(char **tokens, int count, int background) {
     }
 
     if (pid == 0) {
+        // Restore default signal handlers in child
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTSTP, SIG_DFL);
+
         // Background: close terminal input
         if (background) {
             int dev_null = open("/dev/null", O_RDONLY);
@@ -319,7 +354,7 @@ static int execute_cmd_group(char **tokens, int count, int background) {
             }
         }
 
-        // Child process - set up input redirection
+        // Set up input redirection
         if (input_file != NULL) {
             int fd_in = open(input_file, O_RDONLY);
             if (fd_in < 0) {
@@ -330,7 +365,7 @@ static int execute_cmd_group(char **tokens, int count, int background) {
             close(fd_in);
         }
 
-        // Child process - set up output redirection
+        // Set up output redirection
         if (output_file != NULL) {
             int flags = O_WRONLY | O_CREAT;
             flags |= output_append ? O_APPEND : O_TRUNC;
@@ -354,9 +389,22 @@ static int execute_cmd_group(char **tokens, int count, int background) {
         return 0;
     }
 
-    // Foreground: wait for child to finish
+    // Foreground: track the process and wait (with WUNTRACED for Ctrl-Z)
+    fg_pid = pid;
+    strncpy(fg_cmd_name, cmd_name, BG_CMD_LEN - 1);
+    fg_cmd_name[BG_CMD_LEN - 1] = '\0';
+
     int status;
-    waitpid(pid, &status, 0);
+    waitpid(pid, &status, WUNTRACED);
+
+    fg_pid = -1;
+    fg_cmd_name[0] = '\0';
+
+    if (WIFSTOPPED(status)) {
+        // Ctrl-Z: move to background as stopped
+        add_bg_job_stopped(pid, cmd_name);
+        return 0;
+    }
 
     if (WIFEXITED(status)) {
         return WEXITSTATUS(status);
@@ -372,7 +420,6 @@ int execute_command(ParsedCommand *cmd) {
 
     int i = 0;
     while (i < cmd->token_count) {
-        // Find end of current cmd_group and what separator follows it
         int group_end = cmd->token_count;
         char *separator = NULL;
         for (int j = i; j < cmd->token_count; j++) {
@@ -390,7 +437,6 @@ int execute_command(ParsedCommand *cmd) {
             execute_cmd_group(&cmd->tokens[i], group_len, is_background);
         }
 
-        // Move to next cmd_group
         if (group_end < cmd->token_count) {
             i = group_end + 1;
         } else {
@@ -404,14 +450,20 @@ int execute_command(ParsedCommand *cmd) {
 void run_shell(void) {
     char input[SHELL_MAX_INPUT];
 
+    // Install signal handlers
+    signal(SIGINT, sigint_handler);
+    signal(SIGTSTP, sigtstp_handler);
+
     // Load persistent log history at startup
     initialize_log();
 
-    while (1) { // infinite loop as we want the shell to keep running until user exits
+    while (1) {
         display_prompt();
 
         if (fgets(input, SHELL_MAX_INPUT, stdin) == NULL) {
+            // Ctrl-D: kill all background jobs and exit
             printf("logout\n");
+            kill_all_bg_jobs();
             break;
         }
 
@@ -437,7 +489,6 @@ void run_shell(void) {
         if (cmd.token_count > 0 && !cmd.valid) {
             printf("Invalid Syntax!\n");
         } else if (cmd.token_count > 0) {
-            // Store in log before executing, but skip if command is "log"
             if (!is_log_command(raw_input)) {
                 add_to_log(raw_input);
             }
